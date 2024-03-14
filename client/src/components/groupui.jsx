@@ -3,38 +3,122 @@ import Row from "react-bootstrap/Row";
 import Col from "react-bootstrap/Col";
 import Spinner from "react-bootstrap/Spinner"; 
 import GraphicDisplay from "./graphicdisplay";
-import GroupDisplay from "./groupdisplay";
-import { preprocessSVG } from "../utils/svg";
-import { boxforce } from "../utils/boxforce";
+import { preprocessSVG, convertCoordinates } from "../utils/svg";
 import { cloneDeep } from "lodash";
-import {
-  createEmptyGraph,
-  isRoot,
-  findRoot,
-  updateVisualProperties,
-  groupNodes,
-  isTree,
-} from "../utils/graph";
-import { nodeColors } from "../utils/palette";
-import * as d3 from "d3";
-import { ReactComponent as Group } from "../icons/group.svg";
+import { createEmptyGraph, } from "../utils/graph";
+import { ReactComponent as Crop } from "../icons/scissors.svg";
 import IconButton from "./iconbutton";
 import { isUndef } from "../utils/misc";
-import { postData } from "../utils/post";
 
 function skipClear(props) {
   const { disableClear } = props;
   return !isUndef(disableClear) && disableClear;
 }
 
-function skipGroup(props) {
-  const { disableGroup } = props;
-  return !isUndef(disableGroup) && disableGroup;
+// encodes the interpretation of click within the 
+// rectangle annotation. That is, are we dragging the 
+// corner, the edge or moving around the whole rectangle
+const RECTANGLE_CLICK_TYPES = [
+  { type: 'TOP_LEFT', move: 'corner' },
+  { type: 'TOP', move: 'edge' },
+  { type: 'TOP_RIGHT', move: 'corner' }, 
+  { type: 'LEFT', move: 'edge' }, 
+  { type: 'WHOLE', move: 'rect' }, 
+  { type: 'RIGHT', move: 'edge' }, 
+  { type: 'BOTTOM_LEFT', move: 'corner' }, 
+  { type: 'BOTTOM', move: 'edge'},
+  { type: 'BOTTOM_RIGHT', move: 'corner' },
+]
+
+const CLICK_TYPE_PCT = 0.2; 
+
+function mapClickToClickType (click, rect) { 
+  const { x, y } = click; 
+  const { x: rx, y: ry, width, height } = rect;
+
+  const dx = (x - rx) / width; 
+  const dy = (y - ry) / height;
+
+  const col = (dx < CLICK_TYPE_PCT) ? 0 : ((dx > 1.0 - CLICK_TYPE_PCT) ? 2 : 1); 
+  const row = (dy < CLICK_TYPE_PCT) ? 0 : ((dy > 1.0 - CLICK_TYPE_PCT) ? 2 : 1); 
+
+  return RECTANGLE_CLICK_TYPES[3 * row + col]; 
 }
 
-function skipNode(props, nid) {
-  const { disableNodes } = props;
-  return !isUndef(disableNodes) && disableNodes.includes(nid);
+function makeRectFromOppositeCorners(cx, cy, ox, oy) {
+  const width = Math.abs(ox - cx); 
+  const height = Math.abs(oy - cy); 
+  const x = Math.min(ox, cx); 
+  const y = Math.min(oy, cy); 
+  return { width, height, x, y };
+}
+
+function updatedAnnotation (click, initClickData) { 
+  const { initAnnotation, initClick, dragType } = initClickData; 
+  const { x: ix, y: iy } = initClick; 
+  const { x: rx, y: ry, width, height } = initAnnotation; 
+  if (dragType.move === 'rect') {
+    const dx = rx - ix; 
+    const dy = ry - iy; 
+    const nx = click.x + dx; 
+    const ny = click.y + dy; 
+    return { x: nx, y: ny, width, height }
+  } else if (dragType.move === 'corner') {
+    let ox, oy, cx, cy; 
+    switch(dragType.type) {
+      case 'TOP_LEFT' :
+        cx = rx;
+        cy = ry; 
+        ox = rx + width; 
+        oy = ry + height; 
+        break; 
+      case 'TOP_RIGHT' :
+        cx = rx + width; 
+        cy = ry; 
+        ox = rx; 
+        oy = ry + height; 
+        break;
+      case 'BOTTOM_LEFT' : 
+        cx = rx;
+        cy = ry + height; 
+        ox = rx + width; 
+        oy = ry; 
+        break;
+      case 'BOTTOM_RIGHT' : 
+        cx = rx + width; 
+        cy = ry + height; 
+        ox = rx;
+        oy = ry; 
+        break;
+      default :
+        cx = cy = ox = oy = 0;
+        break;
+    }
+    const dx = cx - ix; 
+    const dy = cy - iy; 
+    cx = click.x + dx;
+    cy = click.y + dy; 
+    return makeRectFromOppositeCorners (cx, cy, ox, oy) ;
+  } else { 
+    // dragType.move === 'edge'
+    if (dragType.type === 'LEFT') { 
+      const dx = rx - ix;
+      const nx = click.x + dx;
+      return { x: nx, y: ry, width: (rx + width - nx), height }; 
+    } else if (dragType.type === 'RIGHT') {
+      const dx = rx + width - ix;
+      const nx = click.x + dx;
+      return { x: rx, y: ry, width: (nx - rx), height }; 
+    } else if (dragType.type === 'TOP') { 
+      const dy = ry - iy;
+      const ny = click.y + dy;
+      return { x: rx, y: ny, width, height: (ry + height - ny) }; 
+    } else { 
+      const dy = ry + height - iy;
+      const ny = click.y + dy;
+      return { x: rx, y: ry, width, height: (ny - ry) }; 
+    }
+  }
 }
 
 class GroupUI extends Component {
@@ -52,6 +136,7 @@ class GroupUI extends Component {
     super(props);
     const graphic = preprocessSVG('<svg height="100" width="100"></svg>');
     const graph = createEmptyGraph(graphic, { nodes: {}, links: {} });
+    this.fileInputRef = React.createRef(); 
     this.state = {
       graphic,
       graph,
@@ -59,20 +144,51 @@ class GroupUI extends Component {
       selected: [],
       filename: "",
       svgString: '<svg height="100" width="100"></svg>',
-      nothingIn: true
+      nothingIn: false, 
+      imageURL: undefined, 
+      imageWidth: undefined, 
+      imageHeight: undefined,
+      selectedFile: undefined,
+      annotations: [],
+      clickRegistry: undefined,
+      dragActive: false, 
+      cursorMoved: false
     };
-    // d3-force's simulation object for calculating
-    // the graph layout and because it looks cool.
-    this.sim = d3.forceSimulation();
   }
 
-  resetToInit = () => {
-    const { svgString, filename } = this.state;
-    this.setStateWithNewSVG(svgString, filename);
+  handleFileChange = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const imageURL = URL.createObjectURL(file);
+      const graphic = preprocessSVG('<svg height="100" width="100"></svg>');
+      this.setState({ selectedFile: file, imageURL, graphic });
+
+      const img = new Image();
+      img.onload = () => {
+        this.setState({ imageWidth: img.width, imageHeight: img.height });
+      };
+      img.src = imageURL;
+    }
   };
 
-  setGraphState = (graph) => {
-    this.setState({ graph });
+  openFileDialog = () => {
+    this.fileInputRef.current.click();
+  }
+
+  handleDragOver = (event) => {
+    event.preventDefault();
+  }
+
+  handleDrop = (event) => {
+    event.preventDefault();
+    const files = event.dataTransfer.files;
+    if (files.length) {
+      this.handleFiles(files);
+    }
+  };
+
+  handleFiles = (files) => {
+    // Handle the files
   };
 
   /*
@@ -80,12 +196,14 @@ class GroupUI extends Component {
    * click. Any click which isn't caught by a child element
    * of window will be caught here and whatever has been
    * selected by the user would be cleared
-   *
-   * Also fetch a new graphic from the database.
    */
   componentDidMount() {
+    fetch('/upload.svg')
+      .then((response) => response.text())
+      .then((response) => this.setState({ graphic: preprocessSVG(response) })); 
+    
     window.addEventListener("click", this.handleClear);
-    this.getNewSVGFromDB();
+    window.addEventListener("keydown", this.handleKeyPress); 
   }
 
   /*
@@ -98,97 +216,22 @@ class GroupUI extends Component {
       setHighlight(false); 
       setShowNext(false); 
     }
-    this.sim.stop();
     window.removeEventListener("click", this.handleClear);
+    window.removeEventListener("keydown", this.handleKeyPress);
   }
 
-  setStateWithNewSVG = (svgString, filename, groups) => {
-    const graphic = preprocessSVG(svgString);
-    let graph = createEmptyGraph(graphic);
-    if (isUndef(groups)) groups = [];
-    for (let i = 0; i < groups.length; i += 1) {
-      graph = groupNodes(graph, groups[i]);
+  handleKeyPress = (evt) => {
+    if (evt.key === 'Backspace' || evt.key === 'Delete') {
+      this.setState((prevState) => {
+        const { selected, annotations } = prevState; 
+        let newAnnotations = cloneDeep(annotations); 
+        for (let i = 0; i < selected.length; i++) {
+          newAnnotations[selected[i]] = undefined; 
+        }
+        return { annotations: newAnnotations, selected: [] };
+      }); 
     }
-    graph = updateVisualProperties(graph, graphic);
-    this.setState({
-      graphic,
-      graph: graph,
-      hover: [],
-      selected: [],
-      filename,
-      svgString,
-      nothingIn: false
-    });
-    this.updateSimulation(graph);
-    this.tryNotifyParent({ type: "new-svg", graph });
-  };
-
-  /*
-   * Fetch an SVG string from server.
-   * Update the state of the component
-   * with this SVG string and id.
-   */
-  getNewSVGFromDB = () => {
-    const { src, metadata } = this.props;
-    postData(src, metadata).then((item) => {
-      const { svg, filename, groups } = item;
-      this.setStateWithNewSVG(svg, filename, groups);
-    });
-  };
-
-  /*
-   * Update and restart the d3-force simulation.
-   *
-   * This function is called whenever the graph is
-   * changed.
-   *
-   * 1. The alpha value of simulation is set to 1. This
-   *    value slowly decays to 0 as the graph nodes settle
-   *    to their final positions.
-   * 2. The simulation is restarted with the nodes and the
-   *    links set as per the graph.
-   * 3. The forces that make the final layout look reasonable
-   *    are added.
-   * 4. Finally, a callback is registered on the "tick" event.
-   *    D3 will internally call this callback on each step
-   *    of the simulation. The callback updates the graph state
-   *    of the component with the latest value of node positions.
-   *    Once this is done, React will update the GroupDisplay
-   *    component with the new node positions. As a result,
-   *    the user will see the nodes move towards their final
-   *    layout.
-   *
-   * @param   {Object}  graph - Graph over SVG paths.
-   */
-  updateSimulation = (graph, alpha = 1) => {
-    const width = 100;
-    const height = 100;
-    const copy = cloneDeep(graph);
-    const rootNodes = copy.nodes.filter(
-      (node) => typeof node.parent === "undefined"
-    );
-    this.sim
-      .alpha(alpha)
-      .restart()
-      .nodes(rootNodes)
-      .force(
-        "collide",
-        d3.forceCollide().radius((node) => (node.radius + 1) * node.visible)
-      )
-      .force(
-        "charge",
-        d3.forceManyBody().strength((node) => -5 * node.visible)
-      )
-      .force(
-        "boxforce",
-        boxforce((node) => node.radius, width, height)
-      )
-      .force("forceX", d3.forceX(width / 2).strength(0.1))
-      .force("forceY", d3.forceY(height / 2).strength(0.1))
-      .on("tick", () => {
-        this.setGraphState(copy, false);
-      });
-  };
+  }
 
   tryNotifyParent = (msg) => {
     const { notifyParent } = this.props;
@@ -196,6 +239,27 @@ class GroupUI extends Component {
       notifyParent(msg);
     }
   };
+
+  uploadImageAndClick = (file, click, clickIndex) => { 
+    this.setState({ nothingIn: true }); 
+    const formData = new FormData();
+    formData.append("image", file);
+    formData.append("click", JSON.stringify(click));
+    fetch(this.props.target, { 
+      method: "POST",
+      body: formData,
+    })
+    .then(response => response.json())
+    .then(data => {
+      this.setState((prevState) => {
+        const { annotations } = prevState; 
+        let newAnnotations = cloneDeep(annotations); 
+        newAnnotations[clickIndex] = undefined; 
+        newAnnotations.push({ type: 'rectangle', ...data }); 
+        return { nothingIn: false, annotations: newAnnotations }; 
+      }); 
+    })
+  }
 
   /*
    * Handle Click event on a particular node.
@@ -211,132 +275,119 @@ class GroupUI extends Component {
    * @param   {Number}  id - Id of the node on which
    * the event was fired.
    */
-  handleClick = (event, id) => {
-    if (skipNode(this.props, id)) return;
-    const selected = cloneDeep(this.state.selected);
-    const graph = this.state.graph;
-    id = findRoot(id, graph);
-    const isSelected = selected.includes(id);
-    // Toggle on the basis of whether the node was already selected or not.
-    if (isSelected) {
-      selected.splice(selected.indexOf(id), 1);
-    } else {
-      selected.push(id);
-    }
-    this.setState({ selected });
-    this.tryNotifyParent({ type: "select", selected });
+  handleClick = (event) => {
+    const x = event.clientX; 
+    const y = event.clientY; 
+    this.setState((prevState) => {
+      const { annotations, dragActive, selectedFile } = prevState; 
+      if (isUndef(selectedFile)) { 
+        this.openFileDialog();
+      } else {
+        if (!dragActive) {
+          const clickPoint = convertCoordinates('svg-element', x, y);
+          const newAnnotations = [...annotations, { type: "point", ...clickPoint }];
+          this.uploadImageAndClick(prevState.selectedFile, clickPoint, annotations.length); 
+          return { annotations: newAnnotations };
+        }
+      }
+    });
   };
 
-  /*
-   * Handle the event when the pointer hovers over
-   * some node.
-   *
-   * Sets the internal state to mark all the paths
-   * who are being hovered over currently. We make such
-   * paths more transparent to give user feedback.
-   *
-   * @param   {Number}  id - Id of the node.
-   */
+  handleMouseOverSvg = (event) => {
+    const click = convertCoordinates('svg-element', event.clientX, event.clientY); 
+    this.setState((prevState) => {
+      const { dragActive } = prevState; 
+      if (dragActive) { 
+        const { clickRegistry, annotations } = prevState; 
+        const newAnnotations = cloneDeep(annotations); 
+        newAnnotations[clickRegistry.index] = updatedAnnotation(click, clickRegistry); 
+        return { annotations: newAnnotations, cursorMoved: true }; 
+      }
+    }); 
+  }; 
+
   handlePointerOver = (id) => {
-    const graph = this.state.graph;
-    id = findRoot(id, graph);
-    if (!isRoot(id, graph)) {
-      this.handlePointerOver(graph.nodes[id].parent);
-      return;
-    }
-    let node = graph.nodes[id];
-    node.fill = nodeColors.hover;
-    if (node.type === "path") {
-      const hover = [id];
-      this.setState({ hover });
-    } else {
-      const hover = node.children.map((i) => graph.nodes[i].paths).flat();
-      this.setState({ hover });
-    }
   };
 
-  /*
-   * Reset state when pointer leaves some node.
-   *
-   * @param   {Number}  id - Id of the node.
-   */
   handlePointerLeave = (id) => {
-    const graph = this.state.graph;
-    id = findRoot(id, graph);
-    let node = graph.nodes[id];
-    node.fill = nodeColors.group;
-    this.setState({ hover: [] });
   };
 
-  /*
-   * Burst the bubble and undo the grouping.
-   *
-   * @param   {Number}  id - Id of the node.
-   */
-  handleNodeDblClick = (event, id) => {
-    this.setState({ selected: [] });
-    let graph = cloneDeep(this.state.graph);
-    if (graph.nodes[id].type === "path") {
-      return;
-    }
-    let children = graph.nodes[id].children;
-    for (let i = 0; i < children.length; i++) {
-      const childId = children[i];
-      graph.nodes[childId].parent = undefined;
-    }
-    graph.links = graph.links.filter(
-      (link) => !(link.source === id || link.target === id)
-    );
-    const idMap = {};
-    graph.nodes = graph.nodes.filter((node) => node.id !== id);
-    graph.nodes.forEach((node, i) => (idMap[node.id] = i));
-    for (let i = 0; i < graph.nodes.length; i++) {
-      let node = graph.nodes[i];
-      node.id = idMap[node.id];
-      if (!isRoot(node.id, graph)) node.parent = idMap[node.parent];
-      for (let j = 0; j < node.children.length; j++) {
-        node.children[j] = idMap[node.children[j]];
-      }
-    }
-    for (let i = 0; i < graph.links.length; i++) {
-      let link = graph.links[i];
-      link.source = idMap[link.source];
-      link.target = idMap[link.target];
-    }
-    graph = updateVisualProperties(graph, this.state.graphic);
-    this.updateSimulation(graph);
-    this.tryNotifyParent({ type: "group-undo" });
+  handleCropClick = (event) => {
+    const { selectedFile, annotations } = this.state;
+    let rectangleAnnotations = annotations.filter((x) => (!isUndef(x))); 
+    // rectangleAnnotations = rectangleAnnotations.filter((x) => (x.type === 'rectangle')); 
+    const formData = new FormData();
+    formData.append("image", selectedFile);
+    formData.append("annot", JSON.stringify(rectangleAnnotations));
+    fetch('/cropper', { 
+      method: "POST",
+      body: formData,
+    })
+      .then(response => response.blob())
+      .then(blob => {
+        const url = window.URL.createObjectURL(new Blob([blob]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', 'crops.zip');
+        document.body.appendChild(link);
+        link.click();
+        link.parentNode.removeChild(link);
+        window.URL.revokeObjectURL(url);
+      }); 
   };
 
-  /*
-   * Handle click on the group button.
-   *
-   * Check whether the selected nodes are
-   * mergeable. Create a new node representing
-   * the merge if this is the case.
-   */
-  handleGroupClick = (event) => {
-    if (skipGroup(this.props)) return;
-    const selected = [...this.state.selected];
-    const graph = updateVisualProperties(
-      groupNodes(this.state.graph, selected),
-      this.state.graphic
-    );
-    if (isTree(graph)) {
-      postData(this.props.target, {
-        ...this.state,
-        graph,
-        ...this.props.metadata,
-      }).then((res) => this.tryNotifyParent({ type: "tree-check", ...res }));
-      if (!isUndef(this.props.setHighlight)) {
-        const { setHighlight, setShowNext } = this.props;
-        setHighlight(true); 
-        setShowNext(true);
+  handleDragStartRect = (evt, annotation, index) => {
+    const click = convertCoordinates('svg-element', evt.clientX, evt.clientY);
+    this.setState((prevState) => {
+      const { dragActive } = prevState; 
+      if (dragActive) {
+        return {}; 
       }
-    }
-    this.updateSimulation(graph);
-    this.tryNotifyParent({ type: "group", selected });
-  };
+      const clickData = {
+        dragType: mapClickToClickType(click, annotation), 
+        initClick: click, 
+        initAnnotation: annotation,
+        index: index
+      }
+      return { clickRegistry: clickData, dragActive: true }; 
+    }); 
+  }
+
+  handleDragRect = (evt, annotation, index) => {
+    const click = convertCoordinates('svg-element', evt.clientX, evt.clientY);
+    this.setState((prevState) => {
+      const { dragActive, clickRegistry, annotations } = prevState; 
+      if (dragActive) { 
+        const newAnnotations = cloneDeep(annotations); 
+        newAnnotations[clickRegistry.index] = updatedAnnotation(click, clickRegistry); 
+        return { annotations: newAnnotations, cursorMoved: true }; 
+      }
+    }); 
+  }
+
+  handleClickRect = (evt, annotation, index) => {
+    this.setState((prevState) => {
+      const { selected, cursorMoved } = prevState; 
+      if (!cursorMoved) { 
+        if (selected.includes(index)) {
+          return { selected: selected.filter((i) => i !== index) }; 
+        } else {
+          return { selected: [...selected, index] }; 
+        }
+      }
+    }); 
+  }
+
+  handleDragEndRect = (evt, annotation, index) => {
+    this.setState((prevState) => {
+      if (prevState.cursorMoved) { 
+        setTimeout(() => {
+          this.setState({ cursorMoved: false }); 
+        }, 100); 
+      }
+      return { clickRegistry: undefined, dragActive: false }
+    });
+  }
 
   /*
    * Clear the selections.
@@ -369,44 +420,47 @@ class GroupUI extends Component {
     if (isUndef(highlightSvg)) highlightSvg = [];
     if (isUndef(highlightGraph)) highlightGraph = [];
     if (isUndef(highlightGroup)) highlightGroup = false;
+
     return (
       <>
+        <input
+          ref={this.fileInputRef}
+          type="file"
+          onChange={this.handleFileChange}
+          style={{ display: 'none' }}
+        />
         <Row>
           <Col className="d-flex justify-content-center">
             <GraphicDisplay
               graphic={this.state.graphic}
               graph={this.state.graph}
+              imageWidth={this.state.imageWidth}
+              imageHeight={this.state.imageHeight}
+              imageURL={this.state.imageURL} 
               selected={this.state.selected}
+              annotations={this.state.annotations}
               hover={this.state.hover}
               onClick={this.handleClick}
               onPointerOver={this.handlePointerOver}
               onPointerLeave={this.handlePointerLeave}
               highlight={highlightSvg}
-            />
-          </Col>
-          <Col className="d-flex justify-content-center">
-            <GroupDisplay
-              graphic={this.state.graphic}
-              docId={this.state.id}
-              graph={this.state.graph}
-              selected={this.state.selected}
-              onClick={this.handleClick}
-              onPointerOver={this.handlePointerOver}
-              onPointerLeave={this.handlePointerLeave}
-              onNodeDblClick={this.handleNodeDblClick}
-              highlight={highlightGraph}
+              onDragStartRect={this.handleDragStartRect}
+              onDragRect={this.handleDragRect}
+              onDragEndRect={this.handleDragEndRect}
+              onClickRect={this.handleClickRect} 
+              onMouseOverSvg={this.handleMouseOverSvg}
             />
           </Col>
         </Row>
-        <Row>
+        <Row className="border-top">
           <Col>
             <IconButton
-              name="Group"
+              name="Crop"
               active={true}
-              onClick={this.handleGroupClick}
-              highlight={highlightGroup}
+              onClick={this.handleCropClick}
+              // highlight={highlightCrop}
             >
-              <Group />
+              <Crop />
             </IconButton>
           </Col>
         </Row>

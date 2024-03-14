@@ -5,6 +5,7 @@ import "../css/transition.css";
 
 function PageTransition(props) {
   const { children, page, ...rest } = props;
+  console.log(children.length, page);
   return (
     <SwitchTransition mode="out-in">
       <CSSTransition

@@ -45,6 +45,23 @@ function coverElement(path, key, props, t) {
   });
 }
 
+function getAdjustedPlacement (imageWidth, imageHeight) { 
+  if (imageHeight > imageWidth) { 
+    const newHeight = 100;
+    const newWidth = Math.floor(100 * (imageWidth / imageHeight)); 
+    const newY = 0; 
+    const newX = Math.floor((100 - newWidth) / 2); 
+    return { h: newHeight, w: newWidth, x: newX, y: newY }; 
+  } else {
+    const newWidth = 100;
+    const newHeight = Math.floor(100 * (imageHeight / imageWidth)); 
+    const newX = 0; 
+    const newY = Math.floor((100 - newHeight) / 2); 
+    return { h: newHeight, w: newWidth, x: newX, y: newY }; 
+  }
+
+}
+
 function pathElement(path, key, events) {
   const { onClick, onPointerOver, onPointerLeave } = events;
   return React.createElement(path.tagName, {
@@ -54,6 +71,126 @@ function pathElement(path, key, events) {
     onPointerOver: addStopPropagation(() => onPointerOver(key)),
     onPointerLeave: addStopPropagation(() => onPointerLeave(key)),
   });
+}
+
+function createAnnotationElement (annotation, index, props) { 
+  // this is basically an svg cross using two lines
+  if (isUndef(annotation)) {
+    return <></>; 
+  }
+  const { selected } = props; 
+  const color = selected.includes(index) ? "red" : "cyan"; 
+  const { type } = annotation;
+  const crossSize = 0.5; 
+  if (type === "point") {
+    const { x, y } = annotation;
+    const line1 = {
+      x1: x - crossSize,
+      y1: y,
+      x2: x + crossSize,
+      y2: y,
+    };
+    const line2 = {
+      x1: x,
+      y1: y - crossSize,
+      x2: x,
+      y2: y + crossSize,
+    };
+    return (
+      <g>
+        <line {...line1} stroke={ color } strokeWidth="0.5" strokeLinecap="round" />
+        <line {...line2} stroke={ color } strokeWidth="0.5" strokeLinecap="round" />
+      </g>
+    );
+  } else {
+    const { x, y, width, height } = annotation;
+    const cornerProps = { 
+      stroke: color, 
+      strokeWidth: "0.8", 
+      strokeLinecap: "round"
+    } 
+        // onDragStart={addStopPropagation((evt) => props.onDragStartRect(evt, annotation, index))}
+    return (
+      <g 
+        key={`annotation-${index}`} 
+        draggable="true"
+        onMouseDown={addStopPropagation((evt) => props.onDragStartRect(evt, annotation, index))}
+        onMouseMove={addStopPropagation((evt) => props.onDragRect(evt, annotation, index))} 
+        onMouseUp={addStopPropagation((evt) => props.onDragEndRect(evt, annotation, index))}
+        onClick={addStopPropagation((evt) => props.onClickRect(evt, annotation, index))}
+      >
+        <line
+          x1={x}
+          y1={y}
+          x2={x + crossSize}
+          y2={y}
+          {...cornerProps}
+        />
+        <line
+          x1={x}
+          y1={y}
+          x2={x}
+          y2={y + crossSize}
+          {...cornerProps}
+        />
+        <line
+          x1={x + width}
+          y1={y}
+          x2={x + width - crossSize}
+          y2={y}
+          {...cornerProps}
+        />
+        <line
+          x1={x + width}
+          y1={y}
+          x2={x + width}
+          y2={y + crossSize}
+          {...cornerProps}
+        />
+        <line
+          x1={x}
+          y1={y + height}
+          x2={x + crossSize}
+          y2={y + height}
+          {...cornerProps}
+        />
+        <line
+          x1={x}
+          y1={y + height}
+          x2={x}
+          y2={y + height - crossSize}
+          {...cornerProps}
+        />
+        <line
+          x1={x + width}
+          y1={y + height}
+          x2={x + width - crossSize}
+          y2={y + height}
+          {...cornerProps}
+        />
+        <line
+          x1={x + width}
+          y1={y + height}
+          x2={x + width}
+          y2={y + height - crossSize}
+          {...cornerProps}
+        />
+        <rect 
+          x={x} 
+          y={y} 
+          width={width} 
+          height={height} 
+          style={{ 
+            fill: color, 
+            fillOpacity: 0.3,
+            stroke: color, 
+            strokeDasharray: "1,1", 
+            strokeWidth: 0.2
+          }} 
+        />
+      </g>
+    );
+  }
 }
 
 class GraphicDisplay extends Component {
@@ -96,6 +233,14 @@ class GraphicDisplay extends Component {
    * @returns {Array}   List of graphic elements as React Elements.
    */
   graphicElements = () => {
+    const { imageURL, imageHeight, imageWidth, annotations} = this.props;
+    if (!isUndef(imageURL)) { 
+      const { x, y, h, w } = getAdjustedPlacement(imageWidth, imageHeight); 
+      const imageJSX = <image href={ imageURL } x={ x } y={ y } height={ h } width={ w }/>;
+      let elements = [imageJSX]; 
+      elements = elements.concat(annotations.map((anno, idx) => createAnnotationElement(anno, idx, this.props))); 
+      return elements; 
+    }
     const { paths, defs } = this.props.graphic;
     const elements = paths.map((path, key) => {
       return (
@@ -116,7 +261,7 @@ class GraphicDisplay extends Component {
     const children = this.graphicElements();
     return React.createElement(
       svg.tagName,
-      { ...svg.properties, id: "svg-element" },
+      { ...svg.properties, id: "svg-element", onClick: this.props.onClick, onMouseOver:this.props.onMouseOverSvg, style: { cursor: 'grab' } },
       children
     );
   }

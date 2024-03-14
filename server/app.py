@@ -1,17 +1,31 @@
+PATH_TO_SEGMENT_ANYTHING = '../../segment-anything'
+import numpy as np
 import os
-from subprocess import call
 import os.path as osp
-from flask import Flask, jsonify, request, session, make_response
+import sys
+sys.path.append(PATH_TO_SEGMENT_ANYTHING) 
+from model import * 
+from PIL import Image
+from subprocess import call
+from flask import Flask, jsonify, request, session, make_response, send_file
+from io import BytesIO
+import zipfile
 from flask_session import Session
 import pickle
-from vectorrvnn.utils import *
-from vectorrvnn.data import *
-from vectorrvnn.geometry import *
 import requests
-import svgpathtools as svg
 import uuid
 import json
 from functools import partial
+import random
+import string
+
+model = load_model(
+    osp.join(PATH_TO_SEGMENT_ANYTHING, 'lightning_logs/version_27'),
+    dict(sam_ckpt_path=osp.join(PATH_TO_SEGMENT_ANYTHING, './checkpoints/sam_vit_h_4b8939.pth'))
+)
+
+def random_string(k=10):
+    return ''.join(random.choices(string.ascii_lowercase, k=k))
 
 def rootdir():  
     return osp.abspath(osp.dirname(__file__))
@@ -22,172 +36,138 @@ SESSION_TYPE = 'filesystem'
 app.config.from_object(__name__)
 Session(app)
 
+def image_coord_to_point (image_coord, imageHeight, imageWidth) : 
+    X, Y = image_coord
+
+    if imageHeight > imageWidth:
+        newHeight = 100
+        newWidth = int(100 * (imageWidth / imageHeight))
+        newY = 0
+        newX = int((100 - newWidth) / 2)
+    else:
+        newWidth = 100
+        newHeight = int(100 * (imageHeight / imageWidth))
+        newX = 0
+        newY = int((100 - newHeight) / 2)
+
+    scale = max(imageHeight, imageWidth)
+    x, y = X * 100 / scale, Y * 100 / scale
+
+    return (x + newX, y + newY)
+
+def point_to_image_coord (point, imageHeight, imageWidth) : 
+    x, y = point
+
+    if imageHeight > imageWidth:
+        newHeight = 100
+        newWidth = int(100 * (imageWidth / imageHeight))
+        newY = 0
+        newX = int((100 - newWidth) / 2)
+    else:
+        newWidth = 100
+        newHeight = int(100 * (imageHeight / imageWidth))
+        newX = 0
+        newY = int((100 - newHeight) / 2)
+    
+    dx = max(0, x - newX)
+    dy = max(0, y - newY)
+
+    if imageHeight > imageWidth :
+        dy = min(100, dy)
+        dx = min(100 * imageWidth / imageHeight, dx)
+        X = (dx / 100) * imageHeight
+        Y = (dy / 100) * imageHeight
+    else : 
+        dx = min(100, dx)
+        dy = min(100 * imageHeight / imageWidth, dy)
+        X = (dx / 100) * imageWidth
+        Y = (dy / 100) * imageWidth
+
+    return (X, Y)
+
+def cropImg (img, rect) : 
+    x, y, width, height = rect['x'], rect['y'], rect['width'], rect['height'] 
+    imgWidth, imgHeight = img.size
+    l, t = point_to_image_coord((x, y), imgHeight, imgWidth)
+    r, b = point_to_image_coord((x + width, y + height), imgHeight, imgWidth) 
+    return img.crop((l, t, r, b))
+
 # Important globals.
-CAPTCHA_VERIFY = 'https://www.google.com/recaptcha/api/siteverify'
-CAPTCHA_SECRET = os.environ['CAPTCHA_SECRET']
-EMOJI_DATASET = '../../emoji-dataset/interesting'
-DATADIR = '../../vectorrvnn/data/MyAnnotations'
-ANNO_BASE = './data/'
-SVGS = list(filter(
-    lambda x : x.endswith('svg'), 
-    allfiles(DATADIR)
-))
-GROUP_HEURISTICS=[
-    groupByShapeContexts
-]
-rng.seed(100)
-
-def getGroups (tree) : 
-    groups = []
-    for heuristic in GROUP_HEURISTICS : 
-        groups.extend(heuristic(tree)) 
-    # Some of these groups may overlap. Finding the maximum number 
-    # of non-overlapping groups is NP Complete. 
-    rng.shuffle(groups)
-    mark = [False for _ in range(tree.nPaths)]
-    selected = []
-    for g in groups : 
-        if all([not mark[_] for _ in g]) : 
-            selected.append([int(_) for _ in g])
-            for _ in g :
-                mark[_] = True
-    return selected
-
 @app.route('/')
 def root():  
     session['id'] = uuid.uuid4()
-    session['tasks'] = rng.sample(range(len(SVGS)), 5)
-    mkdir(f'{ANNO_BASE}/{session["id"]}') 
-    with open(f'{ANNO_BASE}/{session["id"]}/tasks.txt', 'w+') as fp : 
-        for i in session['tasks'] : 
-            fp.write(SVGS[i] + '\n') 
     with open(f'{app.static_folder}/index.html') as fp :
         content = fp.read()
     resp = make_response(content)
     return resp
 
-@app.route('/vis') 
-def vis () :
-    with open(f'{app.static_folder}/vis.html') as fp: 
-        content = fp.read()
-    return make_response(content)
-
-@app.route('/emoji-dataset', methods=['POST', 'GET']) 
-def emojiDataset () : 
-    startId = request.json['startId']
-    number = request.json['number']
-    svgFiles = listdir(EMOJI_DATASET)[startId:startId+number]
-    svgs = []
-    for svgFile in svgFiles: 
-        with open(svgFile) as fp : 
-            svgs.append(fp.read())
-    return jsonify(svgs=svgs)
-
-@app.route('/task', methods=['POST', 'GET']) 
-def task () : 
-    taskNum = request.json['taskNum']
-    svgFile = SVGS[session['tasks'][taskNum]]
-    tree = SVGData(svgFile, convert2usvg=True) 
-    groups = getGroups(tree)
-    return jsonify(svg=tree.svg, groups=groups, filename=svgFile)
-
-@app.route('/validate', methods=['POST', 'GET'])
-def validate () : 
-    token = request.json['captchaValue']
-    email = request.json['email']
-    turkid = request.json['turkid']
-    payload = {
-        "secret": CAPTCHA_SECRET,
-        "response": token
-    }
-    resp = requests.post(CAPTCHA_VERIFY, data=payload).json()
-    if resp['success'] : 
-        id = session['id']
-        with open(f'{ANNO_BASE}/{id}/email.txt', 'w+') as fp : 
-            fp.write(email)
-        with open(f'{ANNO_BASE}/{id}/turkid.txt', 'w+') as fp :
-            fp.write(turkid)
-    return jsonify(success=resp['success'])
-
-@app.route('/logip', methods=['POST', 'GET']) 
-def logip () :
+@app.route('/inference', methods=['POST'])
+def inference():
+    if 'id' not in session:
+        return jsonify(success=False, message="No session ID found"), 400
+    
     id = session['id']
-    payload = request.json
-    with open(f'{ANNO_BASE}/{id}/ip.json', 'w+') as fp: 
-        json.dump(payload, fp)
-    return jsonify(success=True)
 
-@app.route('/tutorialgraphic', methods=['POST', 'GET'])
-def tutorialgraphic () :
-    with open('./assets/tutorial.pkl', 'rb') as fp: 
-        T = pickle.load(fp) 
-    inFile = '/tmp/in.svg'
-    with open(inFile, 'w+') as fp :
-        fp.write(repr(T.doc))
-    outFile = '/tmp/o.svg'
-    call(['usvg', inFile, outFile])
-    with open(outFile) as fd :
-        svg = fd.read()
-    return jsonify(svg=svg, filename='tutorial.svg')
+    if 'image' not in request.files:
+        return jsonify(success=False, message="No image part in the request"), 400
 
-@app.route('/checktutorial', methods=['POST', 'GET']) 
-def checktutorial () : 
+    file = request.files['image']
+
+    if file.filename == '':
+        return jsonify(success=False, message="No selected file"), 400
+
+    if file:
+        image = Image.open(file.stream)
+        width, height = image.size
+        click = json.loads(request.form.get('click'))
+        point = point_to_image_coord((click['x'], click['y']), height, width)
+        _, pts = model.run_inference(np.array(image), [point])
+        pts = np.array([image_coord_to_point(_, height, width) for _ in pts])
+        x, y = np.min(pts[:, 0]), np.min(pts[:, 1])
+        X, Y = np.max(pts[:, 0]), np.max(pts[:, 1])
+        return jsonify(dict(x=x, y=y, width=X - x, height=Y - y))
+
+    return jsonify(dict(success=False))
+
+@app.route('/cropper', methods=['POST']) 
+def cropper() : 
+    if 'id' not in session:
+        return jsonify(success=False, message="No session ID found"), 400
+    
     id = session['id']
-    with open('./assets/tutorial.pkl', 'rb') as fp: 
-        T = pickle.load(fp) 
-    T_ = appGraph2nxGraph(request.json['graph'])
-    with open(f'{ANNO_BASE}/{id}/tutorialTree.json', 'w+') as fp :
-        json.dump(request.json, fp)
-    score = norm_cted(T, T_)
-    with open(f'{ANNO_BASE}/{id}/tutscores.txt', 'a+') as fp :
-        fp.write(f'{score}\n')
-    success = score < 0.25
-    return jsonify(success=success)
 
-@app.route('/survey', methods=['POST', 'GET']) 
-def survey () :
-    id = session['id']
-    ratings = request.json
-    with open(f'{ANNO_BASE}/{id}/survey.txt', 'w+') as fp :
-        for i, r in enumerate(ratings) :
-            fp.write(f'{i}, {r}\n')
-    return jsonify(success=True)
+    if 'image' not in request.files:
+        return jsonify(success=False, message="No image part in the request"), 400
 
-@app.route('/tree', methods=['POST', 'GET'])
-def tree () : 
-    id = session['id']
-    payload = request.json
-    taskNum = payload['taskNum']
-    with open(f'{ANNO_BASE}/{id}/treeData{taskNum}.json', 'w+') as fp :
-        json.dump(payload, fp)
-    return jsonify(success=True)
+    file = request.files['image']
 
-@app.route('/time', methods=['POST', 'GET'])
-def time () : 
-    id = session['id'] 
-    payload = request.json
-    if payload.get('start', False) :
-        with open(f'{ANNO_BASE}/{id}/startTime.json', 'w+') as fp: 
-            json.dump(payload, fp)
-    elif payload.get('end', False) : 
-        with open(f'{ANNO_BASE}/{id}/endTime.json', 'w+') as fp :
-            json.dump(payload, fp)
-    elif payload.get('slideId', None) is not None : 
-        with open(f'{ANNO_BASE}/{id}/slideTime.json', 'a+') as fp: 
-            fp.write(json.dumps(payload) + '\n')
-    return jsonify(success=True)
+    if file.filename == '':
+        return jsonify(success=False, message="No selected file"), 400
 
-@app.route('/comments', methods=['POST', 'GET'])
-def comments () : 
-    id = session['id']
-    comments = request.json['comments']
-    with open(f'{ANNO_BASE}/{id}/comments.txt', 'w+') as fp :
-        fp.write(comments + '\n') 
-    cid = str(uuid.uuid4())[:6]
-    with open(f'{ANNO_BASE}/{id}/cid.txt', 'w+') as fp :
-        fp.write(cid + '\n')
-    return jsonify(cid=cid, success=True)
+    if file:
+        image = Image.open(file.stream)
+        rects = json.loads(request.form.get('annot'))
+        crops = [cropImg(image, _) for _ in rects]
+
+        directory_path = f'/tmp/{random_string(10)}' 
+        os.makedirs(directory_path, exist_ok=True) 
+        image.save(osp.join(directory_path, file.filename))
+
+        for i, crop in enumerate(crops) :
+            crop.save(osp.join(directory_path, f'crop_{i}.png'))
+
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for root, dirs, files in os.walk(directory_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    zip_file.write(file_path, arcname=os.path.relpath(file_path, start=directory_path))
+        zip_buffer.seek(0)
+        return send_file(zip_buffer, mimetype='application/zip', download_name='crops.zip', as_attachment=True)
+
+
+    return jsonify(dict(success=False))
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=80)
+    app.run(host='0.0.0.0', port=7860)
 

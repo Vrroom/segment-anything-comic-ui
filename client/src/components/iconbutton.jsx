@@ -53,7 +53,7 @@ class IconButton extends Component {
       style["boxShadow"] = `0 0 0 .6rem ${color}`;
     }
     return (
-      <Row>
+      <Row className="mt-3 mb-3" >
         <Col className="d-flex justify-content-center">
           <OverlayTrigger
             placement="bottom"

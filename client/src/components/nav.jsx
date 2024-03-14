@@ -10,7 +10,7 @@ import HelpModal from "./helpmodal";
 
 function sendEmail() {
   window.open(
-    "mailto:sumit.chaturvedi@gmail.com?subject=VGTrees Annotation App"
+    "mailto:sumit.chaturvedi@gmail.com?subject=Comic Annotation App"
   );
 }
 
@@ -21,7 +21,7 @@ function Nav(props) {
       <Navbar>
         <Container className="border-bottom">
           <Navbar.Brand>
-            <h1>VGTrees</h1>
+            <h1>ComicCut</h1>
           </Navbar.Brand>
           <Navbar.Toggle />
           <Navbar.Collapse className="justify-content-end">
