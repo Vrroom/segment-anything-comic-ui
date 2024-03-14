@@ -236,9 +236,18 @@ class GraphicDisplay extends Component {
     const { imageURL, imageHeight, imageWidth, annotations} = this.props;
     if (!isUndef(imageURL)) { 
       const { x, y, h, w } = getAdjustedPlacement(imageWidth, imageHeight); 
+      const background = <rect x="0" y="0" width="100" height="100" fill="gray" fill-opacity="0.5" />; 
       const imageJSX = <image href={ imageURL } x={ x } y={ y } height={ h } width={ w }/>;
-      let elements = [imageJSX]; 
+      let elements = [background, imageJSX]; 
       elements = elements.concat(annotations.map((anno, idx) => createAnnotationElement(anno, idx, this.props))); 
+      const closeElement = (
+        <g onClick={addStopPropagation((evt) => this.props.onClickCross())} >
+          <rect x="95" y="0" width="5" height="5" fill="#999999" rx="1" ry="1" />
+          <line x1="96.5" y1="1.5" x2="98.5" y2="3.5" stroke="#666666" strokeWidth="0.5" strokeLinecap="round"/>
+          <line x1="98.5" y1="1.5" x2="96.5" y2="3.5" stroke="#666666" strokeWidth="0.5" strokeLinecap="round"/>
+        </g>
+      );
+      elements.push(closeElement);
       return elements; 
     }
     const { paths, defs } = this.props.graphic;

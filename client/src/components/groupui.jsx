@@ -429,7 +429,7 @@ class GroupUI extends Component {
           onChange={this.handleFileChange}
           style={{ display: 'none' }}
         />
-        <Row>
+        <Row className="mt-2 mb-4">
           <Col className="d-flex justify-content-center">
             <GraphicDisplay
               graphic={this.state.graphic}
@@ -449,6 +449,7 @@ class GroupUI extends Component {
               onDragEndRect={this.handleDragEndRect}
               onClickRect={this.handleClickRect} 
               onMouseOverSvg={this.handleMouseOverSvg}
+              onClickCross={this.props.onClickCross}
             />
           </Col>
         </Row>

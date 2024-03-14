@@ -117,11 +117,11 @@ def inference():
         return jsonify(success=False, message="No selected file"), 400
 
     if file:
-        image = Image.open(file.stream)
+        image = Image.open(file.stream).convert('RGB')
         width, height = image.size
         click = json.loads(request.form.get('click'))
         point = point_to_image_coord((click['x'], click['y']), height, width)
-        _, pts = model.run_inference(np.array(image), [point])
+        pts = model.run_inference_simple_pil(image, [point])
         pts = np.array([image_coord_to_point(_, height, width) for _ in pts])
         x, y = np.min(pts[:, 0]), np.min(pts[:, 1])
         X, Y = np.max(pts[:, 0]), np.max(pts[:, 1])
